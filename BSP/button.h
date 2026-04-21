@@ -9,4 +9,4 @@
 /* 读取 KEY1 的一次稳定按下沿，按住不重复触发。 */
 uint8_t Button_Key1Pressed(void);
 
-#endif /* __BUTTON_H__ */
+#endif
