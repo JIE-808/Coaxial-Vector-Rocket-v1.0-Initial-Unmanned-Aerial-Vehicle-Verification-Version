@@ -36,6 +36,7 @@
 #include "ultrasonic.h"
 #include "usb_printf.h"
 #include "vbat_adc.h"
+#include "ano_protocol.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -47,7 +48,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define DISPLAY_REFRESH_PERIOD_MS   50U   /* LCD 屏幕刷新周期：50ms = 20Hz */
-#define STATUS_PRINT_PERIOD_MS     200U  /* USB 串口状态打印周期：200ms = 5Hz */
+#define STATUS_PRINT_PERIOD_MS     10U   /* ANO 协议发送周期：10ms = 100Hz */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -160,7 +161,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 /**
   * @brief  The application entry point.
-  * @retval int
+  * @retval int 
   */
 int main(void)
 {
@@ -221,6 +222,9 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
+    /* 将 USB ISR 中缓冲的 ANO 协议响应帧安全发出 */
+    ANO_Service_Deferred();
+
     /* ── 致命低压保护：已切断输出，只做低功耗等待 ── */
     if (VBAT_IsShutdown()) {
       HAL_Delay(100);
@@ -242,7 +246,7 @@ int main(void)
         // 舵机归中（保持PWM通道运行，只是输出中位值）
         TVC_Center();
         
-        usb_printf("\r\n[!!!] CRASH DETECTED, ALL POWER OFF [!!!]\r\n");
+        // usb_printf("\r\n[!!!] CRASH DETECTED, ALL POWER OFF [!!!]\r\n");
       }
     }
 
@@ -290,35 +294,23 @@ int main(void)
       RefreshRuntimeDisplay();
     }
 
-    /* ── 5Hz USB 状态打印 ── */
+    /* ── 100Hz：匿名科创 V7 上位机协议（仅发二进制帧，文本已关闭防止干扰） ── */
     if ((HAL_GetTick() - last_status_ms) >= STATUS_PRINT_PERIOD_MS) {
       last_status_ms = HAL_GetTick();
-      PrintRuntimeStatus();
-      
-      int cur_throttle = rc_channels[2];
-      int simulated_pwm = 1000 + ((cur_throttle - 300) * 1000) / (1700 - 300);
-      if (simulated_pwm < 1000) simulated_pwm = 1000;
-      if (simulated_pwm > 2000) simulated_pwm = 2000;
-      
-      if (is_crashed) {
-          usb_printf(">> SYSTEM LOCKED: CRASH DETECTED! <<\r\n");
-      } else if (!is_armed) {
-          usb_printf(">> SYSTEM LOCKED: Hold KEY1 for 3s to ARM... <<\r\n");
-      } else {
-          usb_printf("SBUS[CH3]: %d, Target PWM: %d us, Connected: %d\r\n", cur_throttle, simulated_pwm, sbus_connected);
-      }
 
-      /* ── 诊断信息：舵机 + 状态 ── */
-      usb_printf("[DBG] armed=%d crash=%d vbat_off=%d att_rdy=%d\r\n",
-                 is_armed, is_crashed, VBAT_IsShutdown(), Attitude_IsReady());
-      usb_printf("[DBG] servo_L=%lu servo_R=%lu base_thr=%u\r\n",
-                 __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_1),
-                 __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_3),
-                 TVC_GetBaseThrottle());
+      /* 以下 usb_printf 已关闭：ASCII 文本会干扰匿名上位机对二进制帧的解析
+      PrintRuntimeStatus();
+      int cur_throttle = rc_channels[2];
+      ...
+      usb_printf(">> SYSTEM LOCKED ...");
+      usb_printf("[DBG] P:...");
+      */
+
       if (Attitude_IsReady()) {
           attitude_data_t *dbg = Attitude_GetData();
-          usb_printf("[DBG] P:%.2f R:%.2f Y:%.2f dt:%.1fms\r\n",
-                     dbg->pitch, dbg->roll, dbg->yaw, dbg->dt * 1000.0f);
+
+          ANO_Send_AttitudeAndSenser(dbg->pitch, dbg->roll, dbg->yaw, 1,
+                                     dbg->accel, dbg->gyro);
       }
     }
   }
@@ -396,24 +388,41 @@ static void InitApplicationModules(void)
   USB_Printf_Init();
   usb_printf("\r\n===== TZ_wej_test1 Boot =====\r\n");
 
+  usb_printf("[INIT] LCD...\r\n");
   LCD_Init();
   LCD_Fill(0, 0, LCD_W, LCD_H, WHITE);
+  usb_printf("[INIT] LCD OK\r\n");
 
+  usb_printf("[INIT] Attitude...\r\n");
   Attitude_Init();
+  usb_printf("[INIT] Attitude OK\r\n");
+
   IMU_Heat_Init();
+  usb_printf("[INIT] IMU Heat OK\r\n");
+
   TVC_Init();
   TVC_Center();
+  usb_printf("[INIT] TVC OK\r\n");
 
   VBAT_Init();
+  usb_printf("[INIT] VBAT OK (%.2fV)\r\n", VBAT_GetVoltage());
 
   ESC_PWM_Init();
   ESC_PWM_SetAllPulseUs(1000);
+  usb_printf("[INIT] ESC PWM OK\r\n");
 
   Ultrasonic_Init();
+  usb_printf("[INIT] Ultrasonic OK\r\n");
+
   AltHold_Init();
+  usb_printf("[INIT] AltHold OK\r\n");
+
+  ANO_Init();
+  usb_printf("[INIT] ANO Protocol OK\r\n");
 
   /* 启动 500Hz 姿态控制定时器 */
   HAL_TIM_Base_Start_IT(&htim4);
+  usb_printf("[INIT] TIM4 500Hz started\r\n");
 
   usb_printf("[INIT] All modules ready.\r\n");
 }
@@ -473,22 +482,19 @@ static void RefreshRuntimeDisplay(void)
 static void PrintRuntimeStatus(void)
 {
   if (!Attitude_IsReady()) {
-    usb_printf("[WAIT] IMU not ready...\r\n");
+    // usb_printf("[WAIT] IMU not ready...\r\n");
     return;
   }
 
   attitude_data_t *att = Attitude_GetData();
-  usb_printf("P:%6.2f R:%6.2f Y:%6.2f  T:%.1fC  VBAT:%.2fV(%.0f%%)  D:%.1fcm\r\n",
-             att->pitch, att->roll, att->yaw,
-             att->temp,
-             VBAT_GetVoltage(), VBAT_GetPercent(),
-             Ultrasonic_IsValid() ? Ultrasonic_GetDistance_cm() : -1.0f);
+  usb_printf("P:%6.2f R:%6.2f Y:%6.2f  T:%.1fC\r\n",
+             att->pitch, att->roll, att->yaw, att->temp);
   /* 定高模式：显示目标/实际高度、PID输出、油门 */
-  usb_printf("[ALT] tgt:%.0fcm act:%.1fcm pid:%+.0fus thr:%u\r\n",
-             AltHold_GetTarget_cm(),
-             Ultrasonic_IsValid() ? Ultrasonic_GetDistance_cm() : -1.0f,
-             AltHold_GetPIDOutput(),
-             TVC_GetBaseThrottle());
+  // usb_printf("[ALT] tgt:%.0fcm act:%.1fcm pid:%+.0fus thr:%u\r\n",
+  //            AltHold_GetTarget_cm(),
+  //            Ultrasonic_IsValid() ? Ultrasonic_GetDistance_cm() : -1.0f,
+  //            AltHold_GetPIDOutput(),
+  //            TVC_GetBaseThrottle());
 }
 
 /**
