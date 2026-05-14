@@ -298,7 +298,8 @@ int main(void)
     if ((HAL_GetTick() - last_status_ms) >= STATUS_PRINT_PERIOD_MS) {
       last_status_ms = HAL_GetTick();
 
-      /* 以下 usb_printf 已关闭：ASCII 文本会干扰匿名上位机对二进制帧的解析
+      /*
+      以下 usb_printf 已关闭：ASCII 文本会干扰匿名上位机对二进制帧的解析
       PrintRuntimeStatus();
       int cur_throttle = rc_channels[2];
       ...
