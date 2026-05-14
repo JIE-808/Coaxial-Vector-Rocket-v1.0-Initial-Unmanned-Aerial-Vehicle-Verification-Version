@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-本项目是一个基于 STM32H723VGT6 微控制器的共轴矢量火箭/无人机飞行控制系统验证平台。该系统集成了姿态解算、推力矢量控制（TVC）、定高控制等核心飞控功能，用于验证共轴矢量推进技术在小型无人飞行器上的应用。
+本项目是基于 STM32H723VGT6 微控制器的共轴矢量火箭/无人机飞行控制系统验证平台。该系统集成了姿态解算、推力矢量控制（TVC）、定高控制等核心飞控功能，用于验证共轴矢量推进技术在小型无人飞行器上的应用。
 
 **GitHub 仓库**: [Coaxial-Vector-Rocket-v1.0-Initial-Unmanned-Aerial-Vehicle-Verification-Version](https://github.com/JIE-808/Coaxial-Vector-Rocket-v1.0-Initial-Unmanned-Aerial-Vehicle-Verification-Version.git)
 
