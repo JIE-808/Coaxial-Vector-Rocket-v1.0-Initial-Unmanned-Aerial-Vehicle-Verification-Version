@@ -20,6 +20,7 @@
 #include "main.h"
 #include "adc.h"
 #include "dma.h"
+#include "memorymap.h"
 #include "spi.h"
 #include "tim.h"
 #include "usart.h"
@@ -161,7 +162,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 /**
   * @brief  The application entry point.
-  * @retval int 
+  * @retval int
   */
 int main(void)
 {
@@ -171,7 +172,7 @@ int main(void)
   /* USER CODE END 1 */
 
   /* MPU Configuration--------------------------------------------------------*/
-    MPU_Config();
+  MPU_Config();
 
   /* MCU Configuration--------------------------------------------------------*/
 
@@ -201,6 +202,7 @@ int main(void)
   MX_TIM2_Init();
   MX_TIM4_Init();
   MX_UART5_Init();
+  MX_UART7_Init();
   /* USER CODE BEGIN 2 */
   /* 完成所有 BSP 模块初始化（USB / LCD / IMU / TVC / VBAT / ESC）
    * 此函数返回后，ESC 电调还在 3s 解锁中，按键暂时无效 */
