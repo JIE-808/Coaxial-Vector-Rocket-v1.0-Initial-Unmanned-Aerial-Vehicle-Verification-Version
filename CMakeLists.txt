@@ -60,6 +60,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     BSP/ultrasonic.c
     BSP/altitude_hold.c
     BSP/ano_protocol.c
+    BSP/rm3100.c
 )
 
 # Add include paths

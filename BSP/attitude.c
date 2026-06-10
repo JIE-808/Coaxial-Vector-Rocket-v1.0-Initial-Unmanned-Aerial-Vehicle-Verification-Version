@@ -48,6 +48,25 @@ static float acc_lp[3] = {0};
 static float gyro_prev[3] = {0};  /* previous valid gyro for outlier rejection */
 static float euler_lp[3] = {0};   /* low-pass filtered euler output */
 
+/* ── RM3100 yaw complementary filter (discrete correction) ──
+ * 全项目 yaw 统一使用 (-180, 180] 度：便于 PID 直接看正负误差，避免 0/360 跳变。
+ * 陀螺仪 Z 轴自由积分（短期响应），RM3100 到达时做一次温和修正（长期无漂移）。
+ * YAW_GYRO_SIGN: 对齐陀螺 Z 与 RM3100 航向正方向（实测顺时针旋转时 gz<0 且 RM3100 yaw 减小 → 设为 +1）。
+ * MAG_YAW_GAIN: 每次磁力计更新修正比例，τ=50ms/GAIN≈1s。 */
+#define YAW_GYRO_SIGN           (+1.0f)
+#define MAG_YAW_GAIN            0.08f
+static volatile float mag_yaw_target = 0.0f;
+static volatile uint8_t mag_has_ref = 0;
+static float yaw_fused_deg = 0.0f;
+static uint8_t yaw_fused_init = 0;
+
+float Attitude_WrapYaw180(float yaw_deg)
+{
+    while (yaw_deg > 180.0f)  yaw_deg -= 360.0f;
+    while (yaw_deg <= -180.0f) yaw_deg += 360.0f;
+    return yaw_deg;
+}
+
 static uint32_t last_tick = 0;
 static uint8_t first_run = 1;
 
@@ -219,6 +238,14 @@ uint8_t Attitude_Init(void)
     /* init euler low-pass with current quaternion angles */
     Quat_ToEuler(&euler_lp[0], &euler_lp[1], &euler_lp[2]);
 
+    /* 用初始四元数航向初始化互补滤波器 yaw 状态 */
+    {
+        float init_p, init_r, init_y;
+        Quat_ToEuler(&init_p, &init_r, &init_y);
+        yaw_fused_deg = Attitude_WrapYaw180(init_y);
+        yaw_fused_init = 0;
+    }
+
     last_tick = DWT->CYCCNT;
     first_run = 1;
     usb_printf("Mahony AHRS init OK\r\n");
@@ -254,13 +281,12 @@ void Attitude_Update(void)
     float gy = g[1] - gyro_bias[1];
     float gz = g[2] - gyro_bias[2];
 
-    /* gyro outlier rejection: if sudden spike >> previous, use previous */
+    /* gyro outlier rejection */
     if (!first_run) {
         if (fabsf(gx - gyro_prev[0]) > GYRO_SPIKE_THRESH) gx = gyro_prev[0];
         if (fabsf(gy - gyro_prev[1]) > GYRO_SPIKE_THRESH) gy = gyro_prev[1];
         if (fabsf(gz - gyro_prev[2]) > GYRO_SPIKE_THRESH) gz = gyro_prev[2];
     }
-    /* low-pass update for next spike detection */
     gyro_prev[0] += GYRO_LP_ALPHA * (gx - gyro_prev[0]);
     gyro_prev[1] += GYRO_LP_ALPHA * (gy - gyro_prev[1]);
     gyro_prev[2] += GYRO_LP_ALPHA * (gz - gyro_prev[2]);
@@ -270,10 +296,35 @@ void Attitude_Update(void)
     float raw_pitch, raw_roll, raw_yaw;
     Quat_ToEuler(&raw_pitch, &raw_roll, &raw_yaw);
 
-    /* euler output low-pass filter to suppress residual noise */
+    /* ═══ Yaw 互补滤波：陀螺仪 Z 轴 + RM3100 磁力计基准（离散修正）═══ */
+    {
+        /* 1. 陀螺仪传播：每个周期自由积分 Z 轴 (rad/s → deg/step) */
+        yaw_fused_deg += YAW_GYRO_SIGN * gz * dt * RAD_TO_DEG;
+
+        /* 2. 磁力计数据到达时做一次离散比例修正 */
+        if (mag_has_ref) {
+            if (!yaw_fused_init) {
+                /* 首次有效磁力计读数：直接初始化 */
+                yaw_fused_deg = mag_yaw_target;
+                yaw_fused_init = 1;
+            } else {
+                /* 最短路径误差统一折返到 (-180, 180] */
+                float error = Attitude_WrapYaw180(mag_yaw_target - yaw_fused_deg);
+                yaw_fused_deg += MAG_YAW_GAIN * error;
+            }
+            mag_has_ref = 0;   /* 消耗标志，每帧磁力计数据只修正一次 */
+        }
+
+        /* 3. 规范化到 (-180, 180] */
+        yaw_fused_deg = Attitude_WrapYaw180(yaw_fused_deg);
+
+        raw_yaw = yaw_fused_deg;
+    }
+
+    /* euler output low-pass — pitch/roll 照旧，yaw 已被互补滤波器平滑 */
     euler_lp[0] += EULER_LP_ALPHA * (raw_pitch - euler_lp[0]);
     euler_lp[1] += EULER_LP_ALPHA * (raw_roll  - euler_lp[1]);
-    euler_lp[2] += EULER_LP_ALPHA * (raw_yaw   - euler_lp[2]);
+    euler_lp[2]  = raw_yaw;   /* yaw 绕过低通，互补滤波器已提供平滑 */
     att_data.pitch = euler_lp[0];
     att_data.roll  = euler_lp[1];
     att_data.yaw   = euler_lp[2];
@@ -302,6 +353,26 @@ attitude_data_t *Attitude_GetData(void)
 uint8_t Attitude_IsReady(void)
 {
     return bmi088_ready;
+}
+
+/* ==================== mag yaw external reference ==================== */
+void Attitude_SetMagYaw(float yaw_deg, uint8_t valid)
+{
+    if (valid) {
+        /* 统一规范化到 (-180, 180]，和 att_data.yaw / PID / ANO 显示保持一致 */
+        float y = Attitude_WrapYaw180(yaw_deg);
+        mag_yaw_target = y;
+        mag_has_ref    = 1;
+        att_data.mag_yaw   = y;
+        att_data.mag_valid = 1;
+    }
+}
+
+void Attitude_SetMagRaw(float mag_x, float mag_y, float mag_z)
+{
+    att_data.mag_raw[0] = mag_x;
+    att_data.mag_raw[1] = mag_y;
+    att_data.mag_raw[2] = mag_z;
 }
 
 /* ==================== display ==================== */

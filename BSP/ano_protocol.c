@@ -1,4 +1,5 @@
 #include "ano_protocol.h"
+#include "attitude.h"
 #include "usbd_cdc_if.h"
 #include <string.h>
 
@@ -108,17 +109,18 @@ void ANO_Send_Attitude(float pitch_deg, float roll_deg, float yaw_deg,
 {
     uint8_t data[7];
     uint8_t off = 0;
+    float yaw_tx_deg = Attitude_WrapYaw180(yaw_deg);
 
-    off += WrI16(&data[off], (int16_t)(roll_deg  * 100.0f));
-    off += WrI16(&data[off], (int16_t)(pitch_deg * 100.0f));
-    off += WrI16(&data[off], (int16_t)(yaw_deg   * 100.0f));
+    off += WrI16(&data[off], (int16_t)(roll_deg   * 100.0f));
+    off += WrI16(&data[off], (int16_t)(pitch_deg  * 100.0f));
+    off += WrI16(&data[off], (int16_t)(yaw_tx_deg * 100.0f));
     data[off++] = fusion_sta;
 
     ANO_Send_Frame(ANO_ADDR_PC, ANO_ID_EULER, data, off);
 }
 
 /* ==================== 0x01 传感器原始数据帧 ==================== */
-void ANO_Send_Senser(const float accel[3], const float gyro[3])
+void ANO_Send_Senser(const float accel[3], const float gyro[3], const float mag[3])
 {
 #define G_MS2       9.80665f
 #define RAD_TO_DEG  57.295779513f
@@ -131,7 +133,9 @@ void ANO_Send_Senser(const float accel[3], const float gyro[3])
     int16_t gy = (int16_t)(gyro[1] * RAD_TO_DEG * 1000.0f);
     int16_t gz = (int16_t)(gyro[2] * RAD_TO_DEG * 1000.0f);
 
-    int16_t mx = 0, my = 0, mz = 0;
+    int16_t mx = (int16_t)(mag[0] * 10.0f);
+    int16_t my = (int16_t)(mag[1] * 10.0f);
+    int16_t mz = (int16_t)(mag[2] * 10.0f);
 
     uint8_t data[18];
     uint8_t off = 0;
@@ -157,7 +161,8 @@ void ANO_Send_Senser(const float accel[3], const float gyro[3])
  */
 void ANO_Send_AttitudeAndSenser(float pitch_deg, float roll_deg, float yaw_deg,
                                 uint8_t fusion_sta,
-                                const float accel[3], const float gyro[3])
+                                const float accel[3], const float gyro[3],
+                                const float mag[3])
 {
 #define G_MS2       9.80665f
 #define RAD_TO_DEG  57.295779513f
@@ -167,6 +172,7 @@ void ANO_Send_AttitudeAndSenser(float pitch_deg, float roll_deg, float yaw_deg,
 
     uint8_t sc, ac;
     uint8_t idx = 0;
+    float yaw_tx_deg = Attitude_WrapYaw180(yaw_deg);
 
     /* ═══ 帧 1: 0x03 欧拉角 ═══ */
     sc = 0; ac = 0;
@@ -184,7 +190,8 @@ void ANO_Send_AttitudeAndSenser(float pitch_deg, float roll_deg, float yaw_deg,
     ano_buf[idx] = (uint8_t)(val & 0xFF); sc += ano_buf[idx]; ac += sc; idx++;
     ano_buf[idx] = (uint8_t)((val>>8)&0xFF); sc += ano_buf[idx]; ac += sc; idx++;
 
-    val = (int16_t)(yaw_deg   * 100.0f);
+    /* yaw 已统一为 (-180, 180]，发送前再折返一次保证 int16 × 100 字段安全 */
+    val = (int16_t)(yaw_tx_deg * 100.0f);
     ano_buf[idx] = (uint8_t)(val & 0xFF); sc += ano_buf[idx]; ac += sc; idx++;
     ano_buf[idx] = (uint8_t)((val>>8)&0xFF); sc += ano_buf[idx]; ac += sc; idx++;
 
@@ -221,10 +228,16 @@ void ANO_Send_AttitudeAndSenser(float pitch_deg, float roll_deg, float yaw_deg,
     ano_buf[idx] = (uint8_t)(val & 0xFF); sc += ano_buf[idx]; ac += sc; idx++;
     ano_buf[idx] = (uint8_t)((val>>8)&0xFF); sc += ano_buf[idx]; ac += sc; idx++;
 
-    /* MAG = 0 */
-    for (int i = 0; i < 6; i++) {
-        ano_buf[idx] = 0; sc += 0; ac += sc; idx++;
-    }
+    /* MAG — RM3100 data in uT, scaled to mGs for ANO protocol (1 uT = 10 mGs) */
+    val = (int16_t)(mag[0] * 10.0f);
+    ano_buf[idx] = (uint8_t)(val & 0xFF); sc += ano_buf[idx]; ac += sc; idx++;
+    ano_buf[idx] = (uint8_t)((val>>8)&0xFF); sc += ano_buf[idx]; ac += sc; idx++;
+    val = (int16_t)(mag[1] * 10.0f);
+    ano_buf[idx] = (uint8_t)(val & 0xFF); sc += ano_buf[idx]; ac += sc; idx++;
+    ano_buf[idx] = (uint8_t)((val>>8)&0xFF); sc += ano_buf[idx]; ac += sc; idx++;
+    val = (int16_t)(mag[2] * 10.0f);
+    ano_buf[idx] = (uint8_t)(val & 0xFF); sc += ano_buf[idx]; ac += sc; idx++;
+    ano_buf[idx] = (uint8_t)((val>>8)&0xFF); sc += ano_buf[idx]; ac += sc; idx++;
 
     ano_buf[idx] = sc; idx++;   /* SC */
     ano_buf[idx] = ac; idx++;   /* AC */

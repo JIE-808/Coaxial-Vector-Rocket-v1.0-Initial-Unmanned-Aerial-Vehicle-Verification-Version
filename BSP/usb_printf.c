@@ -21,8 +21,9 @@ int usb_printf(const char *format, ...)
         return -1;
     }
 
-    /* USB 还未枚举成功时不发送 */
-    if (hUsbDeviceHS.dev_state != USBD_STATE_CONFIGURED) {
+    /* USB CDC 还未完全就绪时不发送，避免主机刚开串口阶段访问未初始化类数据 */
+    if ((hUsbDeviceHS.dev_state != USBD_STATE_CONFIGURED) ||
+        (hUsbDeviceHS.pClassData == NULL)) {
         return -1;
     }
 
@@ -34,15 +35,12 @@ int usb_printf(const char *format, ...)
     if (len < 0 || len >= USB_PRINTF_BUFFER_SIZE) {
         len = USB_PRINTF_BUFFER_SIZE - 1;
     }
-
-    /* 通过 USB CDC 发送 */
-    uint8_t result = CDC_Transmit_HS(usb_txbuf, len);
-    uint32_t timeout = 100000;
-    while (result == USBD_BUSY && timeout--) {
-        result = CDC_Transmit_HS(usb_txbuf, len);
+    if (len == 0) {
+        return 0;
     }
 
-    if (result != USBD_OK) {
+    /* 调试输出采用 best-effort，避免在启动阶段因忙等重试阻塞 USB CDC 时序 */
+    if (CDC_Transmit_HS(usb_txbuf, (uint16_t)len) != USBD_OK) {
         return -1;
     }
 

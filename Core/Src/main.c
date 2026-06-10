@@ -38,6 +38,7 @@
 #include "usb_printf.h"
 #include "vbat_adc.h"
 #include "ano_protocol.h"
+#include "rm3100.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -50,6 +51,9 @@
 /* USER CODE BEGIN PD */
 #define DISPLAY_REFRESH_PERIOD_MS   50U   /* LCD 屏幕刷新周期：50ms = 20Hz */
 #define STATUS_PRINT_PERIOD_MS     10U   /* ANO 协议发送周期：10ms = 100Hz */
+#define DEBUG_PRINT_PERIOD_MS     200U   /* Yaw 调试打印周期：200ms = 5Hz */
+#define YAW_DEBUG_TEXT_ONLY         0U    /* 1=只输出 Yaw 文本调试，暂停 ANO 二进制遥测 */
+#define ANO_BINARY_TELEMETRY_ENABLED (!YAW_DEBUG_TEXT_ONLY)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -84,6 +88,9 @@ static void PrintRuntimeStatus(void);
 __attribute__((section(".dma_buffer")))
 #endif
 ALIGN_32BYTES(uint8_t sbus_rx_buf[64]);
+
+__attribute__((section(".dma_buffer")))
+ALIGN_32BYTES(uint8_t rm3100_rx_buf[256]);
 
 uint16_t rc_channels[16];
 uint8_t sbus_connected = 0; // 0=未连接或断开, 1=连接正常
@@ -147,6 +154,13 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         // 重新开启空闲中断DMA接收
         HAL_UARTEx_ReceiveToIdle_DMA(&huart5, sbus_rx_buf, sizeof(sbus_rx_buf));
     }
+    else if (huart->Instance == UART7)
+    {
+        /* H7 + DMA: 先无效化 Cache，避免 RM3100 解析到旧的 UART7 DMA 数据 */
+        SCB_InvalidateDCache_by_Addr((uint32_t *)rm3100_rx_buf, sizeof(rm3100_rx_buf));
+        RM3100_ProcessBuffer(rm3100_rx_buf, Size);
+        HAL_UARTEx_ReceiveToIdle_DMA(&huart7, rm3100_rx_buf, sizeof(rm3100_rx_buf));
+    }
 }
 
 // 添加串口错误回调函数（非常重要：防止上电瞬间接收机的杂波导致串口溢出死锁）
@@ -154,8 +168,11 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == UART5)
     {
-        // 发生错误（如Overrun即ORE错误），强行重启DMA接收，防止永久死锁
         HAL_UARTEx_ReceiveToIdle_DMA(&huart5, sbus_rx_buf, sizeof(sbus_rx_buf));
+    }
+    else if (huart->Instance == UART7)
+    {
+        HAL_UARTEx_ReceiveToIdle_DMA(&huart7, rm3100_rx_buf, sizeof(rm3100_rx_buf));
     }
 }
 /* USER CODE END 0 */
@@ -208,14 +225,16 @@ int main(void)
    * 此函数返回后，ESC 电调还在 3s 解锁中，按键暂时无效 */
   InitApplicationModules();
   
-  // 启动UART5的SBUS DMA空闲中断接收
+  // UART5 SBUS + UART7 RM3100: DMA+Idle 启动
   HAL_UARTEx_ReceiveToIdle_DMA(&huart5, sbus_rx_buf, sizeof(sbus_rx_buf));
+  HAL_UARTEx_ReceiveToIdle_DMA(&huart7, rm3100_rx_buf, sizeof(rm3100_rx_buf));
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   uint32_t last_display_ms = HAL_GetTick();   /* LCD 刷新时间戳 */
-  uint32_t last_status_ms  = HAL_GetTick();   /* USB 打印时间戳 */
+  uint32_t last_status_ms  = HAL_GetTick();   /* ANO 发送时间戳 */
+  uint32_t last_debug_ms   = HAL_GetTick();   /* USB Yaw 调试打印时间戳 */
   uint32_t last_sonar_ms   = HAL_GetTick();   /* 超声波触发时间戳 */
 
   while (1)
@@ -224,7 +243,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* 将 USB ISR 中缓冲的 ANO 协议响应帧安全发出 */
+    /* ── ANO 协议响应：仅处理上位机请求回复，不产生 100Hz 主动二进制刷屏 ── */
     ANO_Service_Deferred();
 
     /* ── 致命低压保护：已切断输出，只做低功耗等待 ── */
@@ -290,32 +309,45 @@ int main(void)
       }
     }
 
+    /* ── RM3100 磁力计：模块 20Hz 自动回传，DMA 被动接收 ── */
+    RM3100_ParsePending();
+    if (RM3100_IsDataValid()) {
+      RM3100_Data_t mag_data;
+      RM3100_GetData(&mag_data);
+      Attitude_SetMagYaw(mag_data.yaw, 1);
+      Attitude_SetMagRaw(mag_data.mag_x, mag_data.mag_y, mag_data.mag_z);
+      RM3100_ClearDataValid();
+    }
+
     /* ── 20Hz LCD 刷新：姿态 + 电池图标 + 距离 ── */
     if ((HAL_GetTick() - last_display_ms) >= DISPLAY_REFRESH_PERIOD_MS) {
       last_display_ms = HAL_GetTick();
       RefreshRuntimeDisplay();
     }
 
-    /* ── 100Hz：匿名科创 V7 上位机协议（仅发二进制帧，文本已关闭防止干扰） ── */
+#if YAW_DEBUG_TEXT_ONLY
+    /* ── 5Hz USB 调试打印：RM3100 yaw / 融合 yaw / 陀螺 Z ── */
+    if ((HAL_GetTick() - last_debug_ms) >= DEBUG_PRINT_PERIOD_MS) {
+      last_debug_ms = HAL_GetTick();
+      PrintRuntimeStatus();
+    }
+#else
+    (void)last_debug_ms;
+#endif
+
+#if ANO_BINARY_TELEMETRY_ENABLED
+    /* ── 100Hz：匿名科创 V7 上位机协议 ── */
     if ((HAL_GetTick() - last_status_ms) >= STATUS_PRINT_PERIOD_MS) {
       last_status_ms = HAL_GetTick();
-
-      /*
-      以下 usb_printf 已关闭：ASCII 文本会干扰匿名上位机对二进制帧的解析
-      PrintRuntimeStatus();
-      int cur_throttle = rc_channels[2];
-      ...
-      usb_printf(">> SYSTEM LOCKED ...");
-      usb_printf("[DBG] P:...");
-      */
-
       if (Attitude_IsReady()) {
           attitude_data_t *dbg = Attitude_GetData();
-
           ANO_Send_AttitudeAndSenser(dbg->pitch, dbg->roll, dbg->yaw, 1,
-                                     dbg->accel, dbg->gyro);
+                                     dbg->accel, dbg->gyro, dbg->mag_raw);
       }
     }
+#else
+    (void)last_status_ms;
+#endif
   }
   /* USER CODE END 3 */
 }
@@ -423,6 +455,10 @@ static void InitApplicationModules(void)
   ANO_Init();
   usb_printf("[INIT] ANO Protocol OK\r\n");
 
+  usb_printf("[INIT] RM3100 Magnetometer...\r\n");
+  RM3100_Init();
+  /* RM3100_Init prints its own status — failure is non-fatal */
+
   /* 启动 500Hz 姿态控制定时器 */
   HAL_TIM_Base_Start_IT(&htim4);
   usb_printf("[INIT] TIM4 500Hz started\r\n");
@@ -480,24 +516,20 @@ static void RefreshRuntimeDisplay(void)
 }
 
 /**
- * @brief  5Hz USB 串口状态打印：姿态 + 电池 + 温控
+ * @brief  5Hz USB Yaw 调试打印：RM3100 yaw、融合 yaw、陀螺 Z
  */
-static void PrintRuntimeStatus(void)
+static void __attribute__((unused)) PrintRuntimeStatus(void)
 {
   if (!Attitude_IsReady()) {
-    // usb_printf("[WAIT] IMU not ready...\r\n");
     return;
   }
 
   attitude_data_t *att = Attitude_GetData();
-  usb_printf("P:%6.2f R:%6.2f Y:%6.2f  T:%.1fC\r\n",
-             att->pitch, att->roll, att->yaw, att->temp);
-  /* 定高模式：显示目标/实际高度、PID输出、油门 */
-  // usb_printf("[ALT] tgt:%.0fcm act:%.1fcm pid:%+.0fus thr:%u\r\n",
-  //            AltHold_GetTarget_cm(),
-  //            Ultrasonic_IsValid() ? Ultrasonic_GetDistance_cm() : -1.0f,
-  //            AltHold_GetPIDOutput(),
-  //            TVC_GetBaseThrottle());
+  float gyro_z_dps = att->gyro[2] * 57.295779513f;
+  float yaw_err = Attitude_WrapYaw180(att->mag_yaw - att->yaw);
+
+  usb_printf("[YAW] mag:%7.2f fused:%7.2f err:%+7.2f gz:%+8.2f dps mv:%u\r\n",
+             att->mag_yaw, att->yaw, yaw_err, gyro_z_dps, att->mag_valid);
 }
 
 /**

@@ -12,13 +12,13 @@
 
 /* 陀螺仪输入为 rad/s，需转换到 deg/s 与角度量纲一致 */
 #define RAD_TO_DEG_TVC  57.295779513f
-#define SERVO_LEFT_CENTER_US    1520.0f
+#define SERVO_LEFT_CENTER_US    1420.0f
 #define SERVO_LEFT_UP_US       2000.0f
 #define SERVO_LEFT_DOWN_US       1000.0f
 
-#define SERVO_RIGHT_CENTER_US   1550.0f
-#define SERVO_RIGHT_DOWN_US      1000.0f
-#define SERVO_RIGHT_UP_US      2000.0f
+#define SERVO_RIGHT_CENTER_US   1520.0f
+#define SERVO_RIGHT_DOWN_US      2000.0f
+#define SERVO_RIGHT_UP_US      1000.0f
 
 /* 角度到脉宽的近似换算：45deg 对应约 500us。 */
 #define SERVO_US_PER_DEG        11.111f
@@ -48,8 +48,9 @@
 
 /*
  * 当前混控约定（匹配实际机构）：
- * pitch: left -= pitch_us, right -= pitch_us  （共模：两舵机同向）
- * roll : left -= roll_us,  right += roll_us   （差动：两舵机反向）
+ * 左舵机 PWM 增大→UP，右舵机 PWM 减小→UP。
+ * pitch: 左右舵机物理同向上下；因左右 PWM 方向相反，pitch 采用 PWM 反向混控。
+ * roll : 左右舵机物理反向上下；因左右 PWM 方向相反，roll 采用 PWM 同向混控。
  */
 /* 外环：角度误差 -> 目标角速度（deg/s）— PI（加小量积分消除稳态漂移） */
 static TVC_PID_t g_pitch_angle_pid = {
@@ -221,12 +222,13 @@ void TVC_Update(float pitch, float roll, float gyro_y, float gyro_x, float gyro_
     roll_us = roll_output * SERVO_US_PER_DEG;
 
     /*
-     * 修正后混控约定（匹配实际机构方向）：
-     * pitch: left -= pitch_us, right -= pitch_us  （共模：两舵机同向）
-     * roll : left -= roll_us,  right += roll_us   （差动：两舵机反向）
+     * 实测机构方向：
+     * pitch > 0 纠偏时：左舵机向 1000us、右舵机向 2000us（两舵机物理同向 DOWN）。
+     * pitch < 0 纠偏时：左舵机向 2000us、右舵机向 1000us（两舵机物理同向 UP）。
+     * roll 输出为物理反向偏转，因此在 PWM 上同向叠加。
      */
-    left_us  = SERVO_LEFT_CENTER_US  - pitch_us - roll_us;
-    right_us = SERVO_RIGHT_CENTER_US - pitch_us + roll_us;
+    left_us  = SERVO_LEFT_CENTER_US  + pitch_us - roll_us;
+    right_us = SERVO_RIGHT_CENTER_US - pitch_us - roll_us;
 
     #define MIN(a,b) ((a)<(b)?(a):(b))
     #define MAX(a,b) ((a)>(b)?(a):(b))

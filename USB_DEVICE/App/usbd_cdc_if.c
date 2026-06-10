@@ -282,10 +282,23 @@ uint8_t CDC_Transmit_HS(uint8_t* Buf, uint16_t Len)
 {
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 12 */
-  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceHS.pClassData;
-  if (hcdc->TxState != 0){
+  USBD_CDC_HandleTypeDef *hcdc;
+
+  if ((Buf == NULL) || (Len == 0U)) {
+    return USBD_FAIL;
+  }
+
+  /* CDC 还未完全就绪时直接返回，避免主机刚枚举/开串口阶段访问空类数据 */
+  if ((hUsbDeviceHS.dev_state != USBD_STATE_CONFIGURED) ||
+      (hUsbDeviceHS.pClassData == NULL)) {
     return USBD_BUSY;
   }
+
+  hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceHS.pClassData;
+  if (hcdc->TxState != 0U) {
+    return USBD_BUSY;
+  }
+
   USBD_CDC_SetTxBuffer(&hUsbDeviceHS, Buf, Len);
   result = USBD_CDC_TransmitPacket(&hUsbDeviceHS);
   /* USER CODE END 12 */
